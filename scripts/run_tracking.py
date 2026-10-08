@@ -26,9 +26,17 @@ from typing import Iterator, Tuple
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
-from boxmot.tracker_zoo import create_tracker, get_tracker_config
+try:
+    from ultralytics import YOLO
+except ImportError:
+    YOLO = None  # type: ignore
+
+try:
+    from boxmot.tracker_zoo import create_tracker, get_tracker_config
+except ImportError:
+    create_tracker = None  # type: ignore
+    get_tracker_config = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Các biến CỐ ĐỊNH cho cả lớp — KHÔNG sửa khi làm bài chính. Nếu muốn thử

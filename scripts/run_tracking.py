@@ -125,27 +125,84 @@ def detect(detector: YOLO, frame: np.ndarray, conf: float, iou: float) -> np.nda
     return np.hstack([xyxy, conf_arr[:, None], cls_arr[:, None]])
 
 
+def filter_box_aspect_ratio(
+    boxes: np.ndarray,
+    min_aspect_ratio: float = 1.2,
+    max_aspect_ratio: float = 5.0,
+) -> np.ndarray:
+    """Lọc bỏ các hộp có tỉ lệ chiều cao/rộng không phù hợp với dáng người.
+
+    Dùng để loại trừ bóng phản chiếu trên kính (thường dẹt ngang hoặc méo mó).
+
+    Args:
+        boxes: Mảng các hộp detection có kích thước (N, 6) dạng [x1, y1, x2, y2, conf, cls].
+        min_aspect_ratio: Tỉ lệ h/w tối thiểu (mặc định 1.2).
+        max_aspect_ratio: Tỉ lệ h/w tối đa (mặc định 5.0).
+
+    Returns:
+        Mảng các hộp hợp lệ sau khi lọc.
+    """
+    if len(boxes) == 0:
+        return boxes
+    widths = np.maximum(boxes[:, 2] - boxes[:, 0], 1e-6)
+    heights = np.maximum(boxes[:, 3] - boxes[:, 1], 1e-6)
+    ratios = heights / widths
+    mask = (ratios >= min_aspect_ratio) & (ratios <= max_aspect_ratio)
+    return boxes[mask]
+
+
+def filter_perspective_geometry(
+    boxes: np.ndarray,
+    frame_height: int,
+    min_height_ratio: float = 0.02,
+) -> np.ndarray:
+    """Lọc các hộp theo quan hệ phối cảnh không gian và vị trí camera.
+
+    Args:
+        boxes: Mảng các hộp detection (N, 6).
+        frame_height: Chiều cao ảnh (px).
+        min_height_ratio: Tỷ lệ chiều cao tối thiểu của hộp so với chiều cao khung hình.
+
+    Returns:
+        Mảng các hộp hợp lệ sau khi loại bỏ nhiễu phối cảnh.
+    """
+    if len(boxes) == 0:
+        return boxes
+    heights = boxes[:, 3] - boxes[:, 1]
+    min_h = frame_height * min_height_ratio
+    mask = heights >= min_h
+    return boxes[mask]
+
+
 def run(args: argparse.Namespace) -> None:
     """Detect, track, rồi ghi file kết quả và video xem thử nếu được yêu cầu.
 
     Args:
         args: Tham số đã parse, gồm ``source``, ``seq_name``, ``tracker``,
-            ``conf``, ``iou``, ``device``, ``out``, ``save_video``, ``fps``
-            và ``max_frames``.
+            ``conf``, ``iou``, ``device``, ``out``, ``save_video``, ``fps``,
+            ``max_frames``, ``reid_weights`` và ``enable_geom_filter``.
+
+    Raises:
+        ImportError: Khi thiếu thư viện ultralytics hoặc boxmot.
     """
+    if YOLO is None or create_tracker is None:
+        raise ImportError("Cần cài đặt ultralytics và boxmot để chạy tracking.")
+
     source = Path(args.source)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     mot_txt = out_dir / f"{args.seq_name}.txt"
 
+    reid_path = Path(args.reid_weights) if args.reid_weights else REID_WEIGHTS
+
     print(f"[nạp mô hình] detector={DETECTOR_WEIGHTS} imgsz={IMG_SIZE} tracker={args.tracker}")
     if args.tracker in USES_APPEARANCE:
-        print(f"              tracker này dùng Re-ID: {REID_WEIGHTS.name} (tự tải nếu chưa có)")
+        print(f"              tracker này dùng Re-ID: {reid_path.name}")
     detector = YOLO(DETECTOR_WEIGHTS)
     tracker = create_tracker(
         tracker_type=args.tracker,
         tracker_config=get_tracker_config(args.tracker),
-        reid_weights=REID_WEIGHTS,
+        reid_weights=reid_path,
         device=args.device,
         half=False,
         per_class=False,
@@ -162,6 +219,15 @@ def run(args: argparse.Namespace) -> None:
         n_frames += 1
 
         dets = detect(detector, frame, conf=args.conf, iou=args.iou)
+        if args.enable_geom_filter and len(dets) > 0:
+            h_frame = frame.shape[0]
+            dets = filter_box_aspect_ratio(
+                dets,
+                min_aspect_ratio=args.min_aspect_ratio,
+                max_aspect_ratio=args.max_aspect_ratio,
+            )
+            dets = filter_perspective_geometry(dets, frame_height=h_frame)
+
         tracks = tracker.update(dets, frame)
 
         for track in tracks:
@@ -228,6 +294,10 @@ def parse_args() -> argparse.Namespace:
         "--max-frames", type=int, default=0,
         help="Giới hạn số frame (0 = toàn bộ). Dùng khi thử nhanh; bản nộp phải bỏ tham số này.",
     )
+    parser.add_argument("--reid-weights", default=str(REID_WEIGHTS), help="Trọng số Re-ID (vd: osnet_x0_25_msmt17.pt, osnet_x1_0_msmt17.pt)")
+    parser.add_argument("--enable-geom-filter", action="store_true", help="Kích hoạt bộ lọc hình học / phối cảnh chống phản chiếu kính")
+    parser.add_argument("--min-aspect-ratio", type=float, default=1.2, help="Tỉ lệ h/w tối thiểu cho dáng người")
+    parser.add_argument("--max-aspect-ratio", type=float, default=5.0, help="Tỉ lệ h/w tối đa cho dáng người")
     return parser.parse_args()
 
 
